@@ -1,8 +1,8 @@
 # osbio.contracts
 
 To build the contracts and the unit tests:
-* First, ensure that your __osbio__ is compiled to the core symbol for the OSBIO blockchain that intend to deploy to.
-* Second, make sure that you have ```sudo make install```ed __osbio__.
+* First, ensure that your __OASISBloc__ is compiled to the core symbol for the OSBIO blockchain that intend to deploy to.
+* Second, make sure that you have ```sudo make install```ed __OASISBloc__.
 * Then just run the ```build.sh``` in the top directory to build all the contracts and the unit tests for these contracts.
 
 After build:
