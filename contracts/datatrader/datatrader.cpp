@@ -1,364 +1,363 @@
 #include "datatrader.hpp"
-#include <eosiolib/asset.hpp>
 
 using namespace eosio;
+using namespace eosio::internal_use_do_not_use;
 
 void datatrader::hi( name user ) {
     print("Hello, ", user);
 }
 
-void datatrader::adddata( name provider,
-  std::string datatypename,
-  uint64_t price,
-  std::string field1,
-  std::string field2,
-  std::string field3,
-  std::string field4,
-  std::string field5,
-  std::string idfshash
-  ) {
+void datatrader::adddatabegin(
+    name provider,
+    std::string datatype_name,
+    asset price,
+    std::vector<std::string> detail_fields,
+    uint64_t period,
+    std::string data_hash_original,
+    uint64_t size,
+    std::vector<fragment> fragments
+) {
+    // check provider
     require_auth(provider);
-    // check datatypename
-    data_index dataset(_code, _code.value);
-    auto it = dataset.begin();
-    uint64_t size=0;
-    for(auto& item : dataset ) {
-      size++;
-    }
-    dataset.emplace(_self, [&](auto& row) {
-        row.dataid = size;
-        row.datatypename = datatypename;
+    
+    // check datatype_name
+    auto iterator = _datatype.begin();
+    eosio_assert(_datatype.begin() != _datatype.end(), "There is no data type");
+    do {
+      if ((*iterator).datatype_name == datatype_name)
+        break;
+    } while (++iterator != _datatype.end());
+    eosio_assert(iterator != _datatype.end(), "The datatype is invalid");
+    
+    // Matching idfs cluster for each data fragment
+    fragments = match_idfs_cluster(fragments);
+    
+    // Calculate storage fee day
+    uint64_t total_storage_fee = size * period * MAX_KEEPER_NUMBER_OF_CLUSTER / MEGA_BYTE;
+    if (total_storage_fee < MAX_KEEPER_NUMBER_OF_CLUSTER * fragments.size())
+      total_storage_fee = MAX_KEEPER_NUMBER_OF_CLUSTER * fragments.size();
+    
+    // emplace data
+    uint64_t dataListLength = std::distance(_data.cbegin(), _data.cend());
+    _data.emplace(_self, [&](auto& row) {
+        row.data_id = dataListLength + 1;
+        row.datatype_name = datatype_name;
         row.provider = provider;
-        row.datetime = now();
+        row.timestamp = current_time_point().sec_since_epoch();
         row.price = price;
-        row.status = DATA_STATUS_ON_SALE;
-        row.field1value = field1;
-        row.field2value = field2;
-        row.field3value = field3;
-        row.field4value = field4;
-        row.field5value = field5;
-        row.idfshash = idfshash;
-        });
-    print( "A new data is added by ", provider );
+        row.status = DATA_STATUS_ADDING;
+        row.detail_fields = detail_fields;
+        row.period = period;
+        row.data_hash_original = data_hash_original;
+        row.size = size;
+        row.fragments = fragments;
+        row.total_storage_fee = total_storage_fee;
+    });
 }
 
-[[eosio::action]]
-void datatrader::adddatatype( name user,
-  std::string datatypename,
-  uint64_t fieldnum,
-  std::string field1,
-  std::string field2,
-  std::string field3,
-  std::string field4,
-  std::string field5
-  ) {
-    require_auth(user);
-    datatype_index types(_code, _code.value);
-    uint64_t size = std::distance(types.cbegin(), types.cend());
-    auto iterator = types.begin();
-    while(iterator != types.end()) {
-        if ((*iterator).datatypename == datatypename)
-            break;
-        iterator++;
+void datatrader::adddataend(
+    name provider,
+    uint64_t data_id,
+    std::vector<fragment> fragments
+) {
+    require_auth(provider);
+    auto itData = get_data_by_id(data_id);
+    
+    for (int i = 0; i < fragments.size(); i++) {
+      for (auto f : (*itData).fragments) {
+        if (f.fragment_no == fragments.at(i).fragment_no) {
+          fragments.at(i).size = (*itData).fragments.at(i).size;
+          fragments.at(i).hash_original = (*itData).fragments.at(i).hash_original;
+          fragments.at(i).hash_encrypted = (*itData).fragments.at(i).hash_encrypted;
+          fragments.at(i).idfs_cluster_id = (*itData).fragments.at(i).idfs_cluster_id;
+          
+          // modify usage of idfs cluster
+          auto itCluster = get_idfs_cluster_by_id((*itData).fragments.at(i).idfs_cluster_id);
+          _idfscluster.modify(itCluster, _self, [&](auto& row) {
+            row.usage += (*itData).fragments.at(i).size;
+          });
+          
+          uint64_t amount_reward_total = (*itData).total_storage_fee / MAX_KEEPER_NUMBER_OF_CLUSTER / (*itData).fragments.size();
+          uint64_t amount_reward_claimed = 0;
+          eosio::asset reward_total(amount_reward_total, eosio::symbol("OSB",4));
+          eosio::asset reward_claimed(amount_reward_claimed, eosio::symbol("OSB",4));
+          for (auto keeper_id : (*itCluster).idfs_list) {
+            // Create keeper rewards
+            auto itKeeper = get_idfs_by_id(keeper_id);
+            uint64_t keeperrewardLength = std::distance(_keeperreward.cbegin(), _keeperreward.cend());
+            _keeperreward.emplace(_self, [&](auto& row) {
+                row.reward_id = keeperrewardLength + 1;
+                row.data_id = data_id;
+                row.fragment_no = f.fragment_no;
+                row.cluster_id = (*itData).fragments.at(i).idfs_cluster_id;
+                row.idfs_account = (*itKeeper).account;
+                row.reward_total = reward_total;
+                row.reward_claimed = reward_claimed;
+            });
+          }
+        }
+      }
     }
     
-    if( iterator == types.end() )
-    {
-        types.emplace(_self, [&](auto& row) {
-            row.datatypeid = size;
-            row.datatypename = datatypename;
-            row.definer = user;
-            row.fieldnum = fieldnum;
-            row.field1name = field1;
-            row.field2name = field2;
-            row.field3name = field3;
-            row.field4name = field4;
-            row.field5name = field5;
-            });
-        
-        print( "A new data type is added by ", user );
-    } else {
-        print( "The data type has already been registered by ", user);	
-    }
+    _data.modify(itData, _self, [&](auto& row) {
+      row.status = DATA_STATUS_ON_SALE;
+      row.fragments = fragments;
+    });
+    
+    // Transfer total storage fee
+    int amount = (*itData).total_storage_fee;
+    eosio::asset token(amount, eosio::symbol("OSB",4));
+    action(
+     permission_level{provider, "active"_n},
+     TOKEN_CONTRACT, "transfer"_n,
+     std::make_tuple(provider, _self, token, std::string("Transfer total storage fee"))
+    ).send();
 }
 
-[[eosio::action]]
-void datatrader::buydata( name user, uint64_t dataid ) {
+void datatrader::adddatatype(
+    name user,
+    std::string datatype_name,
+    uint64_t detail_fields_num,
+    std::vector<std::string> detail_fields
+  ) {
+    require_auth(user);
+    uint64_t size = std::distance(_datatype.cbegin(), _datatype.cend());
+    auto iterator = _datatype.begin();
+    if (iterator != _datatype.end()) {
+      do {
+          eosio_assert((*iterator).datatype_name != datatype_name, "The datatype is already exist");
+      } while(++iterator != _datatype.end());
+    }
+    
+    _datatype.emplace(_self, [&](auto& row) {
+        row.datatype_id = size;
+        row.datatype_name = datatype_name;
+        row.definer = user;
+        row.detail_fields_num = detail_fields_num;
+        row.detail_fields = detail_fields;
+        });
+}
+
+void datatrader::buydata(
+    name user,
+    uint64_t data_id,
+    std::string buyer_key
+) {
    require_auth(user);
-   auto iterator = get_data_by_id(dataid);
-   data d = *iterator;
-   if (d.status != DATA_STATUS_ON_SALE) {
-      print("The data is not on sale");
-      return;
+   auto it_data = get_data_by_id(data_id);
+   data d = *it_data;
+   
+   eosio_assert(d.status == DATA_STATUS_ON_SALE, "The data is not on sale");
+
+   uint64_t size = std::distance(_buyhistory.cbegin(), _buyhistory.cend());
+   auto it = _buyhistory.begin();
+   if (_buyhistory.begin() != _buyhistory.end()) {
+     do {
+       eosio_assert(
+         (*it).buyer != user || (*it).data_id != data_id,
+         "The user has already purchased the data"
+       );
+     } while(++it != _buyhistory.end());
    }
 
-   buy_history_index history(_code, _code.value);
-   uint64_t size = std::distance(history.cbegin(), history.cend());
-   auto it_his = history.begin();
-   while(it_his != history.end()) {
-        if ((*it_his).buyer == user &&
-            (*it_his).dataid == dataid)
-            break;
-        it_his++;
-   }
-   // check if buyer has already purchased the data
-   // ...
-
-   history.emplace(_self, [&](auto& row) {
-      row.history_id = size;
+   _buyhistory.emplace(_self, [&](auto& row) {
+      row.buy_id = size + 1;
       row.buyer = user;
-      row.dataid = dataid;
-      row.datetime = now();
+      row.data_id = data_id;
+      row.timestamp = current_time_point().sec_since_epoch();
+      row.buyer_key = buyer_key;
    });
 
    action(
      permission_level{user, "active"_n},
-	 "osb.token"_n, "transfer"_n,
-	 std::make_tuple(user, d.provider, asset(d.price, symbol("FDT", 4)), std::string("Data reward"))
+  	 TOKEN_CONTRACT,
+  	 "transfer"_n,
+  	 std::make_tuple(user, d.provider, d.price, std::string(DATA_REWARD_MEMO))
    ).send();
 }
 
-datatrader::data_index::const_iterator datatrader::get_data_by_id(uint64_t dataid) {
-    data_index dataset(_code, _code.value);
-    auto iterator = dataset.find(dataid);
-    eosio_assert(iterator != dataset.end(), "Dataid is invalid");
-    return iterator;
-}
-
-void datatrader::removedata(name user, uint64_t dataid) {
+void datatrader::removedata(
+    name user,
+    uint64_t data_id
+) {
     require_auth(user);
-    auto iterator = get_data_by_id(dataid);
+    auto iterator = get_data_by_id(data_id);
     data d = *iterator;
-    if (d.provider != user) {
-        print("Only provider can remove data");
-        return;
-    }
-    if (d.status == DATA_STATUS_REMOVED) {
-        print("The data has already been removed");
-        return;
-    }
-    data_index dataset(_code, _code.value);
-    iterator = dataset.find(dataid);
-    dataset.modify(iterator, user, [&](auto& row) {
+    eosio_assert(d.provider == user, "Only provider can remove data");
+    eosio_assert(d.status != DATA_STATUS_REMOVED, "The data has already been removed");
+    iterator = _data.find(data_id);
+    _data.modify(iterator, _self, [&](auto& row) {
         row.status = DATA_STATUS_REMOVED;
     });
 }
 
-void datatrader::datalist(std::string datatypename, name user) {
-    data_index dataset(_code, _code.value);
-    auto it = dataset.find(0);
-    if (it == dataset.end()) {
-        print("No data added");
-        return;
+void datatrader::addidfs(
+    name idfs_account,
+    uint64_t capacity,
+    uint64_t cluster_id,
+    std::string idfs_public_key,
+    std::string ipaddr,
+    uint64_t port
+) {
+    require_auth(idfs_account);
+    
+    uint64_t size = std::distance(_idfs.cbegin(), _idfs.cend());
+    _idfs.emplace(_self, [&](auto& row) {
+      row.idfs_id = size + 1;
+      row.account = idfs_account;
+      row.idfs_public_key = idfs_public_key;
+      row.capacity = capacity;
+      row.since = current_time_point().sec_since_epoch();
+      row.cluster_id = cluster_id;
+      row.ipaddr = ipaddr;
+      row.port = port;
+    });
+    
+    auto itCluster = get_idfs_cluster_by_id(cluster_id);
+    eosio_assert((*itCluster).idfs_list.size() < MAX_KEEPER_NUMBER_OF_CLUSTER,
+        "The cluster is full of maximum number of keepers in a cluster");
+    std::vector<uint64_t> new_idfs_list = (*itCluster).idfs_list;
+    new_idfs_list.push_back(size + 1);
+    if ((*itCluster).capacity == 0 || capacity < (*itCluster).capacity) {
+      _idfscluster.modify(itCluster, _self, [&](auto& row) {
+        row.capacity = capacity;
+        row.idfs_list = new_idfs_list;
+      });
     }
+}
 
-    int count = 0;
-    std::string result;
-    print("{ ");
-    print('"');
-    print("data");
-    print('"');
-    print(": [");
-//    print("{\n  \"data\": [");
-    for(auto& item : dataset) {
-        if (datatypename == "" || datatypename == item.datatypename) {
-            if (count != 0)
-                //print(",\n  ");
-                print(", ");
-            //print("{");
-            print("{");
-            print_data_info(item);
-            if (check_if_buy(user, item.dataid) == true) {
-                print(", ");
-                print('"');
-                print("purchased");
-                print('"');
-                print(": ");
-                print('"');
-                print("true");
-                print('"');
-            }
-            else {
-                print(", ");
-                print('"');
-                print("purchased");
-                print('"');
-                print(": ");
-                print('"');
-                print("false");
-                print('"');
-
-            }
-            print("  }");
-            count++;
-        }
+void datatrader::addcluster(
+    name idfs_account,
+    std::string cluster_key_hash
+) {
+    require_auth(idfs_account);
+    
+    // check if the cluster key is already exist
+    auto iterator = _idfscluster.begin();
+    if (iterator != _idfscluster.end()) {
+      do {
+        eosio_assert((*iterator).cluster_key_hash != cluster_key_hash, "The cluster key is already exist");
+      } while (++iterator != _idfscluster.end());
     }
-    print("]}");
+    
+    uint64_t cluster_length = std::distance(_idfscluster.cbegin(), _idfscluster.cend());
+    _idfscluster.emplace(_self, [&](auto& row) {
+      row.cluster_id = cluster_length + 1;
+      row.cluster_key_hash = cluster_key_hash;
+      row.fee_ratio = 10000;
+    });
 }
 
-void datatrader::print_data_info(const data it) {
-    std::string status;
-    if (it.status == DATA_STATUS_ON_SALE) {
-        status = "on_sale";
-    } else if (it.status == DATA_STATUS_REMOVED) {
-        status = "removed";
-    }
+void datatrader::claimkreward(
+    name idfs_account,
+    uint64_t reward_id
+) {
+    require_auth(idfs_account);
+    
+    // check available reward to claim
+    auto itReward = get_reward_by_id(reward_id);
+    auto itData = get_data_by_id( (*itReward).data_id );
+    eosio_assert((*itData).timestamp + (DAY_SECONDS * (*itData).period)
+        < current_time_point().sec_since_epoch(),
+        "Keeper rewards is available to claim after the end of keeping period");
+    eosio_assert((*itReward).reward_total > (*itReward).reward_claimed,
+        "The reward has already been claimed all");
+        
+    uint64_t claim_amount = (*itReward).reward_total.amount - (*itReward).reward_claimed.amount;
+    eosio::asset claim_token(claim_amount, eosio::symbol("OSB",4));
+      
+    // sending OSB to IDFSs as a reward for keeping data
+    action(
+       permission_level{_self, "active"_n},
+       TOKEN_CONTRACT, "transfer"_n,
+       std::make_tuple(_self, idfs_account, claim_token, std::string(KEEPER_REWARD_MEMO))
+    ).send();
 
-    print('"');
-    print("dataid");
-    print('"');
-    print(": ", it.dataid);
-    print(", ");
-    print('"');
-    print("provider");
-    print('"');
-    print(": ");
-    print('"');
-    print(it.provider);
-    print('"');
-    print(", ");
-    print('"');
-    print("datatypename");
-    print('"');
-    print(": ");
-    print('"');
-    print(it.datatypename);
-    print('"');
-    print(", ");
-    print('"');
-    print("datetime");
-    print('"');
-    print(": ");
-    print('"');
-    print((uint32_t)it.datetime);
-    print('"');
-    print(", ");
-    print('"');
-    print("price");
-    print('"');
-    print(": ", it.price);
-    print(", ");
-    print('"');
-    print("status");
-    print('"');
-    print(": ");
-    print('"');
-    print(status.c_str());
-    print('"');
-    print(",");
-    print('"');
-    print("field1");
-    print('"');
-    print(": ");
-    print('"');
-    print(it.field1value);
-    print('"');
-    print(", ");
-    print('"');
-    print("field2");
-    print('"');
-    print(": ");
-    print('"');
-    print(it.field2value);
-    print('"');
-    print(", ");
-    print('"');
-    print("field3");
-    print('"');
-    print(": ");
-    print('"');
-    print(it.field3value);
-    print('"');
-    print(", ");
-    print('"');
-    print("field4");
-    print('"');
-    print(": ");
-    print('"');
-    print(it.field4value);
-    print('"');
-    print(", ");
-    print('"');
-    print("field5");
-    print('"');
-    print(": ");
-    print('"');
-    print(it.field5value);
-    print('"');
-    print(", ");
-    print('"');
-    print("idfshash");
-    print('"');
-    print(": ");
-    print('"');
-    print(it.idfshash);
-    print('"');
+    // create claim history
+    eosio::asset token(claim_amount, eosio::symbol("OSB",4));
+    uint64_t claim_size = std::distance(_keeperclaim.cbegin(), _keeperclaim.cend());
+    _keeperclaim.emplace(_self, [&](auto& row) {
+      row.claim_id = claim_size + 1;
+      row.reward_id = reward_id;
+      row.quantity = claim_token;
+      row.timestamp = current_time_point().sec_since_epoch();
+    });
 }
 
-void datatrader::datatypelist() {
-    datatype_index types(_code, _code.value);
-    auto iterator = types.begin();
-    if (iterator == types.end()) {
-        print("No datatype added");
-        return;
-    }
-
-    print("{\n  \"datatypename\": [");
-    do {
-        if (iterator != types.begin())
-            print(",\n");
-        print_datatype_info( *iterator );
-    } while (++iterator != types.end());
-    print("]\n}");
+datatrader::data_index::const_iterator datatrader::get_data_by_id(uint64_t data_id) {
+    auto iterator = _data.find(data_id);
+    eosio_assert(iterator != _data.end(), "Data id is invalid");
+    return iterator;
 }
 
-[[eosio::action]]
-void datatrader::getdatatype(std::string datatypename) {
-    datatype_index types(_code, _code.value);
-    auto iterator = types.begin();
-    if (iterator == types.end()) {
-        print("The datatype is not found - ", datatypename.c_str());
-        return;
-    }
-
-    do {
-        if ((*iterator).datatypename == datatypename)
-            print_datatype_info( *iterator );
-    } while (++iterator != types.end());
+datatrader::idfscluster_index::const_iterator datatrader::get_idfs_cluster_by_id(uint64_t cluster_id) {
+    auto iterator = _idfscluster.find(cluster_id);
+    eosio_assert(iterator != _idfscluster.end(), "The idfs cluster id is invalid");
+    return iterator;
 }
 
-void datatrader::print_datatype_info(const datatype it) {
-    print("{\n    \"datatypeid\": ");
-    print(it.datatypeid);
-    print(",\n    \"datatypename\": \"", it.datatypename);
-    print("\",\n    \"definer\": \"", it.definer);
-    print("\",\n    \"fieldnum\": ", it.fieldnum);
-    print(",\n    \"field1\": \"", it.field1name+"\",");
-    print("\n    \"field2\": \"", it.field2name+"\",");
-    print("\n    \"field3\": \"", it.field3name+"\",");
-    print("\n    \"field4\": \"", it.field4name+"\",");
-    print("\n    \"field5\": \"", it.field5name+"\"\n  }");
+datatrader::idfs_index::const_iterator datatrader::get_idfs_by_id(uint64_t keeper_id) {
+    auto iterator = _idfs.find(keeper_id);
+    eosio_assert(iterator != _idfs.end(), "The idfs id is invalid");
+    return iterator;
 }
 
-void datatrader::checkifbuy(name user, uint64_t dataid) {
-    if (check_if_buy(user, dataid) == true)
-        print("purchased");
-    else
-        print("not_purchased");
+datatrader::keeperreward_index::const_iterator datatrader::get_reward_by_id(uint64_t reward_id) {
+    auto iterator = _keeperreward.find(reward_id);
+    eosio_assert(iterator != _keeperreward.end(), "The reward id is invalid");
+    return iterator;
 }
 
-bool datatrader::check_if_buy(name user, uint64_t dataid) {
-  buy_history_index history(_code, _code.value);
-  auto iterator = history.begin();
-  if (iterator == history.end())
+bool datatrader::check_if_buy(name user, uint64_t data_id) {
+  auto iterator = _buyhistory.begin();
+  if (iterator == _buyhistory.end())
       return false;
 
   do {
-        if ((*iterator).buyer == user &&
-            (*iterator).dataid == dataid) {
-            return true;
-        }
-  } while (++iterator != history.end());
+    if ((*iterator).buyer == user &&
+        (*iterator).data_id == data_id) {
+        return true;
+    }
+  } while (++iterator != _buyhistory.end());
   return false;
 }
-EOSIO_DISPATCH( datatrader, (hi)(adddata)(adddatatype)(buydata)(removedata)(datalist)(datatypelist)(getdatatype)(checkifbuy) )
+
+/**
+ * Matching idfs clusters first whose usage is the lowest.
+ * @TODO: Exception for a case of smaller number of clusters than the number of fragments.
+**/
+std::vector<datatrader::fragment> datatrader::match_idfs_cluster(std::vector<fragment> fragments) {
+  eosio_assert(_idfscluster.begin() != _idfscluster.end(), "No idfs cluster");
+  for (uint64_t i = 0; i < fragments.size(); i++) {
+    eosio_assert(fragments.at(i).size > 0, "A fragment size must be bigger than 0");
+    auto min_usage_cluster = _idfscluster.end();
+    auto it_cluster = _idfscluster.begin();
+    do {
+      if (min_usage_cluster == _idfscluster.end()) {
+        if ((*it_cluster).capacity - (*it_cluster).usage >= fragments.at(i).size) {
+          min_usage_cluster = it_cluster;
+        }
+        continue;
+      }
+      if (min_usage_cluster->usage >= (*it_cluster).usage) {
+        // check matched already for previous fragment
+        uint64_t j;
+        for (j = 0; j < i; j++) {
+          if (fragments.at(j).idfs_cluster_id == (*it_cluster).cluster_id) {
+            break;
+          }
+        }
+        if (j == i) {
+          min_usage_cluster = it_cluster;
+        }
+      }
+    } while (++it_cluster != _idfscluster.end());
+    eosio_assert((*min_usage_cluster).capacity - (*min_usage_cluster).usage >= fragments.at(i).size,
+      "There is no idfs cluster to match");
+    fragments.at(i).idfs_cluster_id = (*min_usage_cluster).cluster_id;
+  }
+  
+  return fragments;
+}
+
+EOSIO_DISPATCH( datatrader, (hi)(adddatabegin)(adddataend)(adddatatype)(buydata)(removedata)(addidfs)(addcluster) )
